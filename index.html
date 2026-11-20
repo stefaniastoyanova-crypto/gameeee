@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Споделена Дъска & Чат (PeerJS)</title>
+    <!-- Зареждаме PeerJS директно от CDN -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <style>
+        * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body {
+            margin: 0; padding: 15px; background: #121212; color: #f0f0f0;
+            display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+        }
+        h2 { margin: 5px 0 15px 0; font-size: 1.4rem; text-align: center; }
+        .card {
+            background: #1e1e1e; padding: 15px; border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4); width: 100%; max-width: 700px;
+            margin-bottom: 15px;
+        }
+        .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: center; }
+        input[type="text"] {
+            padding: 10px; border-radius: 8px; border: 1px solid #444;
+            background: #2a2a2a; color: white; font-size: 1rem; outline: none;
+        }
+        button {
+            padding: 10px 16px; border-radius: 8px; border: none; font-weight: bold;
+            cursor: pointer; font-size: 0.95rem; transition: 0.2s;
+        }
+        .btn-primary { background: #4f46e5; color: white; }
+        .btn-primary:hover { background: #4338ca; }
+        .btn-success { background: #10b981; color: white; }
+        .btn-success:hover { background: #059669; }
+        .btn-danger { background: #ef4444; color: white; }
+        
+        #status { margin-top: 10px; text-align: center; font-size: 0.9rem; color: #a3a3a3; }
+        .badge {
+            display: inline-block; padding: 4px 10px; border-radius: 20px;
+            background: #333; color: #38bdf8; font-weight: bold; margin-left: 5px;
+        }
+
+        /* Зона за рисуване */
+        .tools { display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        canvas {
+            background: #ffffff; border-radius: 10px; width: 100%; height: 350px;
+            touch-action: none; /* Важно за рисуване с пръст на телефон */
+            cursor: crosshair; display: block;
+        }
+
+        /* Чат зона */
+        #chatBox {
+            height: 120px; overflow-y: auto; background: #141414; border-radius: 8px;
+            padding: 10px; margin-bottom: 10px; border: 1px solid #333; font-size: 0.9rem;
+        }
+        .msg { margin-bottom: 5px; }
+        .msg span { color: #38bdf8; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>🎨 Мултиплеър Бяла Дъска</h2>
+
+    <!-- Панел за свързване -->
+    <div class="card" id="connectionPanel">
+        <div class="row" style="margin-bottom: 10px;">
+            <input type="text" id="username" placeholder="Твоето име..." value="Участник" style="width: 150px;">
+            <button class="btn-primary" onclick="createRoom()">1. Създай стая (Host)</button>
+        </div>
+        <div class="row">
+            <input type="text" id="roomInput" placeholder="Код на стаята..." style="width: 170px; text-transform: uppercase;">
+            <button class="btn-success" onclick="joinRoom()">2. Влез в стая</button>
+        </div>
+        <div id="status">Избери „Създай стая“ на едно устройство, а с другите влез чрез кода.</div>
+    </div>
+
+    <!-- Работна зона -->
+    <div class="card">
+        <div class="tools">
+            <div>
+                <label>Цвят: <input type="color" id="colorPicker" value="#e11d48"></label>
+                <label style="margin-left: 10px;">Дебелина: 
+                    <input type="range" id="sizePicker" min="2" max="15" value="4" style="width: 70px;">
+                </label>
+            </div>
+            <button class="btn-danger" onclick="clearBoard(true)">Изчисти</button>
+        </div>
+        <canvas id="board"></canvas>
+    </div>
+
+    <!-- Мини чат за тест на връзката -->
+    <div class="card">
+        <div id="chatBox"></div>
+        <div class="row">
+            <input type="text" id="chatInput" placeholder="Напиши съобщение..." style="flex: 1;" onkeypress="if(event.key==='Enter') sendChat()">
+            <button class="btn-primary" onclick="sendChat()">Изпрати</button>
+        </div>
+    </div>
+
+<script>
+    let peer = null;
+    let isHost = false;
+    let connections = []; // За Host: списък с всички свързани клиенти
+    let hostConn = null;  // За Client: връзката към Host-а
+
+    const canvas = document.getElementById('board');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const chatBox = document.getElementById('chatBox');
+
+    // Настройка на реалната резолюция на платното
+    function resizeCanvas() {
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+    }
+    window.addEventListener('load', resizeCanvas);
+
+    // Генериране на кратък 4-буквен код за стая
+    function generateRoomCode() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let code = '';
+        for (let i = 0; i < 4; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+        return code;
+    }
+
+    // 1. СЪЗДАВАНЕ НА СТАЯ (HOST)
+    function createRoom() {
+        const roomCode = generateRoomCode();
+        const peerId = 'webdesign-room-' + roomCode;
+        isHost = true;
+
+        statusEl.innerHTML = 'Създаване на стая...';
+        peer = new Peer(peerId);
+
+        peer.on('open', () => {
+            statusEl.innerHTML = `Стаята е активна! Код за другите устройства: <span class="badge">${roomCode}</span> <br><small>Свързани устройства: <b id="peerCount">1</b></small>`;
+            addSystemMsg(`Ти си Host на стая ${roomCode}. Сподели кода с поне още 2 устройства!`);
+        });
+
+        peer.on('connection', (conn) => {
+            connections.push(conn);
+            updatePeerCount();
+
+            conn.on('open', () => {
+                addSystemMsg(`Ново устройство се свърза! (Общо: ${connections.length + 1})`);
+            });
+
+            conn.on('data', (data) => {
+                handleIncomingData(data);
+                // Host-ът препраща данните към ВСИЧКИ останали клиенти
+                broadcast(data, conn.peer);
+            });
+
+            conn.on('close', () => {
+                connections = connections.filter(c => c.peer !== conn.peer);
+                updatePeerCount();
+                addSystemMsg('Устройство напусна стаята.');
+            });
+        });
+
+        peer.on('error', (err) => {
+            statusEl.innerHTML = 'Грешка: ' + err.type + '. Опитай пак!';
+        });
+    }
+
+    // 2. ВЛИЗАНЕ В СТАЯ (CLIENT)
+    function joinRoom() {
+        const code = document.getElementById('roomInput').value.trim().toUpperCase();
+        if (!code) return alert('Въведи кода на стаята!');
+
+        isHost = false;
+        statusEl.innerHTML = 'Свързване към стая ' + code + '...';
+        peer = new Peer();
+
+        peer.on('open', () => {
+            hostConn = peer.connect('webdesign-room-' + code);
+
+            hostConn.on('open', () => {
+                statusEl.innerHTML = `Свързан успешно към стая <span class="badge">${code}</span>`;
+                addSystemMsg('Свърза се към стаята! Можеш да рисуваш и пишеш.');
+                sendData({ type: 'chat', user: getName(), text: 'се присъедини към стаята!' });
+            });
+
+            hostConn.on('data', (data) => {
+                handleIncomingData(data);
+            });
+
+            hostConn.on('close', () => {
+                statusEl.innerHTML = 'Връзката със стаята беше прекъсната.';
+            });
+        });
+
+        peer.on('error', (err) => {
+            statusEl.innerHTML = 'Неуспешно свързване. Провери кода на стаята!';
+        });
+    }
+
+    // Изпращане на данни в мрежата
+    function sendData(data) {
+        if (isHost) {
+            broadcast(data, null);
+        } else if (hostConn && hostConn.open) {
+            hostConn.send(data);
+        }
+    }
+
+    // Препращане от Host към всички клиенти (без подателя)
+    function broadcast(data, excludePeerId) {
+        connections.forEach(conn => {
+            if (conn.open && conn.peer !== excludePeerId) {
+                conn.send(data);
+            }
+        });
+    }
+
+    // Обработка на получени данни
+    function handleIncomingData(data) {
+        if (data.type === 'draw') {
+            drawLine(data.x0 * canvas.width, data.y0 * canvas.height, data.x1 * canvas.width, data.y1 * canvas.height, data.color, data.size);
+        } else if (data.type === 'clear') {
+            clearBoard(false);
+        } else if (data.type === 'chat') {
+            addChatMsg(data.user, data.text);
+        }
+    }
+
+    function updatePeerCount() {
+        const el = document.getElementById('peerCount');
+        if (el) el.innerText = connections.length + 1;
+    }
+
+    // --- ЛОГИКА ЗА РИСУВАНЕ ---
+    let drawing = false;
+    let lastX = 0, lastY = 0;
+
+    function getCoords(e) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        return {
+            x: clientX - rect.left,
+            y: clientY - rect.top
+        };
+    }
+
+    function startDraw(e) {
+        drawing = true;
+        const pos = getCoords(e);
+        lastX = pos.x;
+        lastY = pos.y;
+    }
+
+    function moveDraw(e) {
+        if (!drawing) return;
+        e.preventDefault();
+        const pos = getCoords(e);
+        const color = document.getElementById('colorPicker').value;
+        const size = document.getElementById('sizePicker').value;
+
+        drawLine(lastX, lastY, pos.x, pos.y, color, size);
+
+        // Изпращаме нормализирани координати (от 0 до 1), за да съвпадат на различни екрани
+        sendData({
+            type: 'draw',
+            x0: lastX / canvas.width,
+            y0: lastY / canvas.height,
+            x1: pos.x / canvas.width,
+            y1: pos.y / canvas.height,
+            color: color,
+            size: size
+        });
+
+        lastX = pos.x;
+        lastY = pos.y;
+    }
+
+    function endDraw() { drawing = false; }
+
+    function drawLine(x0, y0, x1, y1, color, size) {
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = size;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+    }
+
+    function clearBoard(emit) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (emit) sendData({ type: 'clear' });
+    }
+
+    canvas.addEventListener('mousedown', startDraw);
+    canvas.addEventListener('mousemove', moveDraw);
+    canvas.addEventListener('mouseup', endDraw);
+    canvas.addEventListener('mouseout', endDraw);
+
+    canvas.addEventListener('touchstart', startDraw, { passive: false });
+    canvas.addEventListener('touchmove', moveDraw, { passive: false });
+    canvas.addEventListener('touchend', endDraw);
+
+    // --- ЛОГИКА ЗА ЧАТ ---
+    function getName() {
+        return document.getElementById('username').value.trim() || 'Анонимен';
+    }
+
+    function sendChat() {
+        const input = document.getElementById('chatInput');
+        const text = input.value.trim();
+        if (!text) return;
+
+        const user = getName();
+        addChatMsg(user, text);
+        sendData({ type: 'chat', user: user, text: text });
+        input.value = '';
+    }
+
+    function addChatMsg(user, text) {
+        const div = document.createElement('div');
+        div.className = 'msg';
+        div.innerHTML = `<span>${escapeHtml(user)}:</span> ${escapeHtml(text)}`;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function addSystemMsg(text) {
+        const div = document.createElement('div');
+        div.className = 'msg';
+        div.style.color = '#9ca3af';
+        div.style.fontStyle = 'italic';
+        div.innerText = text;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function escapeHtml(str) {
+        return str.replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+    }
+</script>
+</body>
+</html>
